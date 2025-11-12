@@ -1223,7 +1223,7 @@
             
             // 使用配置的baseUrl而非硬编码
             return {
-                url: `${baseUrl}/v1beta/models/${model}:generateContent?key=${getRandomValue(apiKey)}`,
+                url: `${baseUrl}/v1beta/${model}:generateContent?key=${getRandomValue(apiKey)}`,
                 data: {
                     method: 'POST',
                     headers: {
@@ -1560,22 +1560,49 @@ function renderMessages() {
 
         content.appendChild(time);
 
-        // 处理不同类型的消息
-        if (msg.type === 'text') {
-            const bubble = document.createElement('div');
-            bubble.className = 'message-bubble';
-            
-            // 处理多行消息
-            const lines = msg.content.split('\n');
-            bubble.innerHTML = lines.map(line => line || '&nbsp;').join('<br>');
-            content.appendChild(bubble);
+       // 处理不同类型的消息
+if (msg.type === 'text') {
+    const bubble = document.createElement('div');
+    bubble.className = 'message-bubble';
+    
+    // 处理多行消息
+    const lines = msg.content.split('\n');
+    bubble.innerHTML = lines.map(line => line || '&nbsp;').join('<br>');
+    content.appendChild(bubble);
 
-            if (msg.thought) {
-                const thought = document.createElement('div');
-                thought.className = 'message-thought';
-                thought.textContent = msg.thought;
-                content.appendChild(thought);
-            }
+    if (msg.thought) {
+        const thought = document.createElement('div');
+        thought.className = 'message-thought';
+        thought.textContent = msg.thought;
+        content.appendChild(thought);
+    }
+} else if (msg.type === 'retry') {
+    // 重试按钮样式
+    const bubble = document.createElement('div');
+    bubble.className = 'message-bubble';
+    bubble.style.backgroundColor = '#ff6b6b';
+    bubble.style.color = 'white';
+    bubble.style.cursor = 'pointer';
+    bubble.style.textAlign = 'center';
+    bubble.innerHTML = `
+        <i class="fas fa-exclamation-triangle"></i> ${msg.content}<br>
+        <small style="margin-top: 5px; display: block;">
+            <i class="fas fa-redo"></i> 点击重新发送
+        </small>
+    `;
+    
+    bubble.onclick = () => {
+        // 移除错误消息
+        chat.messages = chat.messages.filter(m => m.id !== msg.id);
+        saveData();
+        renderMessages();
+        // 重新调用AI
+        callAI(msg.isNewTopic || false);
+    };
+    
+    content.appendChild(bubble);
+
+
         } else if (msg.type === 'image') {
             const img = document.createElement('img');
             img.className = 'message-image';
@@ -1644,11 +1671,27 @@ function renderMessages() {
             saveData();
             renderMessages();
 
-            // 调用AI
-            await callAI(isNewTopic);
+           // 调用AI,如果失败则添加重试按钮
+           try {
+               await callAI(isNewTopic);
+           } catch (error) {
+                // 添加重试按钮
+                const retryMsg = {
+                    id: 'retry-' + Date.now(),
+                    sender: 'system',
+                    type: 'text',
+                    content: '发送失败,请点击重新发送',
+                    time: new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'}),
+                    isRetry: true
+                };
+                chat.messages.push(retryMsg);
+                saveData();
+                renderMessages();
+            }
+
         }
 
-      // ============ 调用AI ============
+// ============ 调用AI ============
 async function callAI(isNewTopic) {
     const chat = getCurrentChat();
     if (!chat) return;
@@ -1679,7 +1722,6 @@ async function callAI(isNewTopic) {
         } else if (apiType === 'openai') {
             aiResponse = await callOpenAIAPI(chat, isNewTopic);
         } else {
-            // 默认使用Ollama或其他兼容API
             aiResponse = await callOllamaAPI(chat, isNewTopic);
         }
 
@@ -1695,11 +1737,27 @@ async function callAI(isNewTopic) {
         renderMessages();
 
     } catch (error) {
+        // 移除加载消息
         chat.messages = chat.messages.filter(m => m.id !== 'loading');
+        
+        // 添加错误提示和重试按钮
+        const errorMsg = {
+            id: 'error-' + Date.now(),
+            sender: 'system',
+            type: 'retry',
+            content: '发送失败: ' + error.message,
+            time: new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'}),
+            isNewTopic: isNewTopic
+        };
+        chat.messages.push(errorMsg);
+        saveData();
+        renderMessages();
+        
         showNotification('AI调用失败: ' + error.message);
         console.error(error);
     }
 }
+
 
 
 
@@ -1727,10 +1785,18 @@ async function callAI(isNewTopic) {
             return data.response;
         }
 
-       // OpenAI兼容API调用
+      // OpenAI兼容API调用
 async function callOpenAIAPI(chat, isNewTopic) {
     // 获取baseUrl
     let baseUrl = appData.apiSettings.url || 'https://api.openai.com';
+    
+    // 确保URL格式正确
+    if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
+        baseUrl = 'https://' + baseUrl;
+    }
+    if (baseUrl.endsWith('/')) {
+        baseUrl = baseUrl.slice(0, -1);
+    }
     
     // 构建系统指令
     const systemInstruction = buildSystemInstruction(chat);
@@ -1751,30 +1817,80 @@ async function callOpenAIAPI(chat, isNewTopic) {
     };
 
     console.log('调用OpenAI兼容API:', baseUrl + '/v1/chat/completions');
+    console.log('请求模型:', appData.apiSettings.selectedModel);
 
-    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${getRandomValue(appData.apiSettings.key)}`
-        },
-        body: JSON.stringify(requestBody)
-    });
+    try {
+        const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+            method: 'POST',
+            mode: 'cors',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${getRandomValue(appData.apiSettings.key)}`
+            },
+            body: JSON.stringify(requestBody)
+        });
 
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`OpenAI API错误 (${response.status}): ${errorText}`);
+        // 先检查响应类型
+        const contentType = response.headers.get('content-type');
+        console.log('响应Content-Type:', contentType);
+        
+        if (!response.ok) {
+            let errorMessage;
+            
+            // 如果是JSON错误
+            if (contentType && contentType.includes('application/json')) {
+                const errorData = await response.json();
+                errorMessage = errorData.error?.message || JSON.stringify(errorData);
+            } 
+            // 如果是HTML错误页面
+            else if (contentType && contentType.includes('text/html')) {
+                const htmlText = await response.text();
+                console.error('收到HTML响应:', htmlText.substring(0, 500));
+                errorMessage = `API返回了网页而不是JSON数据。请检查：
+1. API地址是否正确 (当前: ${baseUrl})
+2. API Key是否有效
+3. 是否需要配置代理或VPN`;
+            } 
+            // 其他类型错误
+            else {
+                const errorText = await response.text();
+                console.error('收到非JSON响应:', errorText.substring(0, 500));
+                errorMessage = `API返回了意外的响应格式: ${contentType || '未知'}`;
+            }
+            
+            throw new Error(`OpenAI API错误 (${response.status}): ${errorMessage}`);
+        }
+
+        // 检查成功响应的类型
+        if (!contentType || !contentType.includes('application/json')) {
+            const text = await response.text();
+            console.error('成功响应但不是JSON:', text.substring(0, 500));
+            throw new Error('API返回的不是JSON格式的数据。请检查API地址和配置是否正确。');
+        }
+
+        const data = await response.json();
+        
+        // 解析OpenAI响应
+        if (data.choices && data.choices.length > 0 && data.choices[0].message) {
+            return data.choices[0].message.content || '';
+        }
+        
+        throw new Error('OpenAI API返回了无效的响应格式');
+        
+    } catch (error) {
+        // 如果是网络错误
+        if (error.message.includes('Failed to fetch')) {
+            throw new Error('网络连接失败。请检查：\n1. API地址是否可访问\n2. 网络连接是否正常\n3. 是否需要代理');
+        }
+        // 如果是JSON解析错误
+        else if (error instanceof SyntaxError) {
+            throw new Error('API返回的不是有效的JSON数据。请检查API地址是否正确配置。');
+        }
+        // 其他错误直接抛出
+        throw error;
     }
-
-    const data = await response.json();
-    
-    // 解析OpenAI响应（不要在这里清理）
-    if (data.choices && data.choices.length > 0 && data.choices[0].message) {
-        return data.choices[0].message.content || '';
-    }
-    
-    throw new Error('OpenAI API返回了无效的响应格式');
 }
+
 
 
        // Gemini API调用
@@ -1871,43 +1987,68 @@ function cleanAIResponse(response) {
     
     let cleaned = response;
     
-    // 移除各种思考标记
-    // 1. XML风格的思考标签
+    // 1. 移除XML风格的思考标签
     cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, '');
     cleaned = cleaned.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+    cleaned = cleaned.replace(/<thought>[\s\S]*?<\/thought>/gi, '');
     
-    // 2. 中文方括号标记
+    // 2. 移除中文方括号标记
     cleaned = cleaned.replace(/\[思考\][\s\S]*?\[\/思考\]/g, '');
     cleaned = cleaned.replace(/\[思维\][\s\S]*?\[\/思维\]/g, '');
     cleaned = cleaned.replace(/\[分析\][\s\S]*?\[\/分析\]/g, '');
     cleaned = cleaned.replace(/\[内心\][\s\S]*?\[\/内心\]/g, '');
+    cleaned = cleaned.replace(/\[推理\][\s\S]*?\[\/推理\]/g, '');
     
-    // 3. 中文书名号标记
+    // 3. 移除中文书名号标记
     cleaned = cleaned.replace(/【思考】[\s\S]*?【\/思考】/g, '');
     cleaned = cleaned.replace(/【思维链】[\s\S]*?【\/思维链】/g, '');
     cleaned = cleaned.replace(/【分析】[\s\S]*?【\/分析】/g, '');
+    cleaned = cleaned.replace(/【推理】[\s\S]*?【\/推理】/g, '');
     
-    // 4. 英文括号标记
+    // 4. 移除英文括号标记
     cleaned = cleaned.replace(/\(thinking:[\s\S]*?\)/gi, '');
     cleaned = cleaned.replace(/\(thought:[\s\S]*?\)/gi, '');
+    cleaned = cleaned.replace(/\(analysis:[\s\S]*?\)/gi, '');
     
     // 5. 移除常见的思考前缀行
     cleaned = cleaned.replace(/^思考过程[：:].*/gm, '');
     cleaned = cleaned.replace(/^让我想想[：:].*/gm, '');
     cleaned = cleaned.replace(/^分析[：:].*/gm, '');
+    cleaned = cleaned.replace(/^推理[：:].*/gm, '');
+    cleaned = cleaned.replace(/^内心独白[：:].*/gm, '');
     
     // 6. 移除markdown代码块中的思考内容
     cleaned = cleaned.replace(/```thinking[\s\S]*?```/gi, '');
     cleaned = cleaned.replace(/```thought[\s\S]*?```/gi, '');
+    cleaned = cleaned.replace(/```analysis[\s\S]*?```/gi, '');
     
-    // 清理多余的空行（保留最多2个连续空行）
+    // 7. 移除以"思考:"、"分析:"等开头的整段内容(直到遇到换行)
+    cleaned = cleaned.replace(/^思考[:：].+$/gm, '');
+    cleaned = cleaned.replace(/^分析[:：].+$/gm, '');
+    cleaned = cleaned.replace(/^推理[:：].+$/gm, '');
+    
+    // 8. 移除聊天记录标签
+    cleaned = cleaned.replace(/<聊天记录>[\s\S]*?<\/聊天记录>/g, '');
+    
+    // 9. 移除特殊格式标记
+    cleaned = cleaned.replace(/###.*/g, '');  // 移除###开头的行
+    cleaned = cleaned.replace(/\|[^|]+\|/g, '');  // 移除|name|格式
+    cleaned = cleaned.replace(/\([^)]*\d{1,2}:\d{2}[^)]*\)/g, '');  // 移除时间标记
+    
+    // 10. 清理多余的空行(保留最多1个连续空行)
     cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
     
-    // 清理首尾空白
+    // 11. 清理首尾空白
     cleaned = cleaned.trim();
+    
+    // 12. 如果清理后内容为空,返回原始内容(防止过度清理)
+    if (!cleaned || cleaned.length < 2) {
+        return response.trim();
+    }
     
     return cleaned;
 }
+
 
 
         // ============ 构建Prompt ============
@@ -1915,7 +2056,7 @@ function cleanAIResponse(response) {
     let prompt = `请AI扮演{{char}}，完全基于设定中的性格、知识和经历进行思考和回应，杜绝OOC（脱离角色）。
 【重要规则】
 1. 只输出角色的对话内容，不要输出任何思考过程、分析过程或元信息
-2. 不要使用<think>、[思考]、【思维链】等任何形式的思考标记
+2. **不需要输出思考过程，不要输出任何思维链**
 3. 直接以角色身份说话，就像真实的聊天对话
 模拟真实的手机聊天软件对话（如微信、QQ），可以一次发送多条消息（多条消息使用"回车"隔开），模拟思考或连续发言的过程。可以使用口语、缩略语、网络用语、表情包等。回复自然随意，可以有错别字或语病，就像真人聊天一样。你需要记住对话的上下文，保持话题的连贯性，并基于{{char}}与{{user}}之间的关系做出符合角色的反应。
 `;
@@ -1951,7 +2092,7 @@ function cleanAIResponse(response) {
 
             // 回复格式
             if (chat.type === 'single') {
-                prompt += `\n请按以下格式回复：\n`;
+                prompt += `\n严格按以下格式回复：\n`;
                 prompt += `<聊天记录>\n`;
                 prompt += `聊天窗口标题：${chat.name}\n`;
                 prompt += `###心情（可以使用emoji，文字不能超过6个字）\n`;
@@ -2212,49 +2353,76 @@ function sendMessagesWithDelay(chat, messages, index = 0) {
                 let testSuccess = false;
 
                 if (apiType === 'gemini') {
-                    // Gemini API测试 - 测试一个简单的API调用
-                    if (!apiKey) {
-                        throw new Error('Gemini API需要API Key');
-                    }
-                    
-                    // 如果URL为空或是默认的localhost，使用Google官方API
-                    let testUrl = apiUrl;
-                    if (!testUrl || testUrl.includes('localhost') || testUrl.includes('127.0.0.1')) {
-                        testUrl = 'https://generativelanguage.googleapis.com';
-                    }
-                    
-                    // 测试列出模型的API
-                    const testApiUrl = `${testUrl}/v1beta/models?key=${getRandomValue(apiKey)}`;
-                    console.log('测试Gemini连接:', testApiUrl.replace(apiKey, '***'));
-                    
-                    const response = await fetch(testApiUrl);
-                    if (response.ok) {
-                        testSuccess = true;
-                        showNotification('Gemini API连接成功！');
-                    } else {
-                        const errorData = await response.json().catch(() => ({}));
-                        throw new Error(errorData.error?.message || `HTTP ${response.status}`);
-                    }
+    if (!apiKey) {
+        throw new Error('Gemini API需要API Key');
+    }
+    
+    let testUrl = apiUrl;
+    if (!testUrl || testUrl.includes('localhost') || testUrl.includes('127.0.0.1')) {
+        testUrl = 'https://generativelanguage.googleapis.com';
+    }
+    
+    // 测试列出模型的API
+    const testApiUrl = `${testUrl}/v1beta/models?key=${getRandomValue(apiKey)}`;
+    console.log('测试Gemini连接:', testApiUrl.replace(apiKey, '***'));
+    
+    const response = await fetch(testApiUrl, {
+        method: 'GET',
+        mode: 'cors',
+        headers: {
+            'Content-Type': 'application/json'
+        }
+    });
+    
+    if (response.ok) {
+        testSuccess = true;
+        showNotification('Gemini API连接成功！');
+    } else {
+        const errorText = await response.text();
+        console.error('Gemini响应错误:', errorText);
+        throw new Error(`HTTP ${response.status}: ${errorText.substring(0, 100)}`);
+    }
+
+
                 } else if (apiType === 'openai') {
-                    // OpenAI API测试
-                    if (!apiKey) {
-                        throw new Error('OpenAI API需要API Key');
-                    }
-                    
-                    let testUrl = apiUrl || 'https://api.openai.com';
-                    const response = await fetch(`${testUrl}/v1/models`, {
-                        headers: {
-                            'Authorization': `Bearer ${apiKey}`
-                        }
-                    });
-                    
-                    if (response.ok) {
-                        testSuccess = true;
-                        showNotification('OpenAI API连接成功！');
-                    } else {
-                        throw new Error(`HTTP ${response.status}`);
-                    }
-                } else {
+    // OpenAI API测试
+    if (!apiKey) {
+        throw new Error('OpenAI API需要API Key');
+    }
+    
+    let testUrl = apiUrl || 'https://api.openai.com';
+    
+    // 确保URL有协议前缀
+    if (!testUrl.startsWith('http://') && !testUrl.startsWith('https://')) {
+        testUrl = 'https://' + testUrl;
+    }
+    
+    // 移除末尾的斜杠
+    if (testUrl.endsWith('/')) {
+        testUrl = testUrl.slice(0, -1);
+    }
+    
+    console.log('测试OpenAI连接:', `${testUrl}/v1/models`);
+    
+    const response = await fetch(`${testUrl}/v1/models`, {
+        method: 'GET',
+        mode: 'cors',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${getRandomValue(apiKey)}`
+        }
+    });
+    
+    if (response.ok) {
+        testSuccess = true;
+        showNotification('OpenAI API连接成功！');
+    } else {
+        const errorText = await response.text();
+        console.error('OpenAI响应错误:', errorText);
+        throw new Error(`HTTP ${response.status}: ${errorText.substring(0, 100)}`);
+    }
+}
+ else {
                     // Ollama或其他本地API
                     let testUrl = apiUrl || 'http://localhost:11434';
                     if (!testUrl.startsWith('http://') && !testUrl.startsWith('https://')) {
@@ -2303,87 +2471,132 @@ function sendMessagesWithDelay(chat, messages, index = 0) {
                 const apiUrl = document.getElementById('api-url').value.trim();
                 const apiKey = document.getElementById('api-key').value.trim();
 
-                if (apiType === 'gemini') {
-                    // Gemini API - 使用预设模型列表或从API获取
-                    let geminiModels = [];
+               // 修改 fetchModels 函数中的Gemini部分
+if (apiType === 'gemini') {
+    let geminiModels = [];
+    
+    if (apiKey) {
+        try {
+            let testUrl = apiUrl;
+            if (!testUrl || testUrl.includes('localhost') || testUrl.includes('127.0.0.1')) {
+                testUrl = 'https://generativelanguage.googleapis.com';
+            }
+            
+            console.log('Gemini模型请求:', `${testUrl}/v1beta/models?key=***`);
+            
+            const response = await fetch(`${testUrl}/v1beta/models?key=${getRandomValue(apiKey)}`, {
+                method: 'GET',
+                mode: 'cors',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                if (data.models && Array.isArray(data.models)) {
+                    geminiModels = data.models.map(m => ({
+                        name: m.name,
+                        displayName: m.displayName || m.name.replace('models/', '') || 'Unnamed Model'
+                    }));
                     
-                    // 尝试从API获取
-                    if (apiKey) {
-                        try {
-                            let testUrl = apiUrl;
-                            if (!testUrl || testUrl.includes('localhost') || testUrl.includes('127.0.0.1')) {
-                                testUrl = 'https://generativelanguage.googleapis.com';
-                            }
-                            
-                            const response = await fetch(`${testUrl}/v1beta/models?key=${getRandomValue(apiKey)}`);
-                            if (response.ok) {
-                                const data = await response.json();
-                                if (data.models && Array.isArray(data.models)) {
-                                    geminiModels = data.models
-                                        .filter(m => m.name.includes('generateContent'))
-                                        .map(m => ({
-                                            name: m.name.replace('models/', ''),
-                                            displayName: m.displayName || m.name
-                                        }));
-                                }
-                            }
-                        } catch (error) {
-                            console.log('无法从API获取Gemini模型列表，使用预设列表');
-                        }
-                    }
+                    console.log('获取到Gemini模型列表:', geminiModels);
+                }
+            } else {
+                const errorText = await response.text();
+                console.error('Gemini API错误:', response.status, errorText);
+            }
+        } catch (error) {
+            console.error('获取Gemini模型时出错:', error);
+            showNotification('无法从代理获取模型,使用预设列表: ' + error.message);
+        }
+    }
+    
+    // 如果API获取失败,使用预设列表
+    if (geminiModels.length === 0) {
+        geminiModels = [
+            { name: 'models/gemini-2.0-flash-exp', displayName: 'Gemini 2.0 Flash (Experimental)' },
+            { name: 'models/gemini-exp-1206', displayName: 'Gemini Experimental (12-06)' },
+            { name: 'models/gemini-2.0-flash-thinking-exp-1219', displayName: 'Gemini 2.0 Flash Thinking' },
+            { name: 'models/gemini-1.5-pro', displayName: 'Gemini 1.5 Pro' },
+            { name: 'models/gemini-1.5-flash', displayName: 'Gemini 1.5 Flash' },
+            { name: 'models/gemini-1.5-flash-8b', displayName: 'Gemini 1.5 Flash-8B' }
+        ];
+        showNotification('使用预设Gemini模型列表');
+    }
+    
+    appData.models = geminiModels;
+
+
+
+
                     
-                    // 如果API获取失败，使用预设列表
-                    if (geminiModels.length === 0) {
-                        geminiModels = [
-                            { name: 'gemini-1.5-pro', displayName: 'Gemini 1.5 Pro' },
-                            { name: 'gemini-1.5-flash', displayName: 'Gemini 1.5 Flash' },
-                            { name: 'gemini-1.5-flash-8b', displayName: 'Gemini 1.5 Flash-8B' },
-                            { name: 'gemini-pro', displayName: 'Gemini Pro' },
-                            { name: 'gemini-pro-vision', displayName: 'Gemini Pro Vision' }
-                        ];
-                    }
-                    
-                    appData.models = geminiModels;
-                    
-                } else if (apiType === 'openai') {
-                    // OpenAI API - 尝试从代理URL获取模型列表
-                    let openaiModels = [];
-                    
-                    if (apiKey && apiUrl) {
-                        try {
-                            // 尝试从配置的URL获取模型
-                            const response = await fetch(`${apiUrl}/v1/models`, {
-                                headers: {
-                                    'Authorization': `Bearer ${getRandomValue(apiKey)}`
-                                }
-                            });
-                            
-                            if (response.ok) {
-                                const data = await response.json();
-                                if (data.data && Array.isArray(data.data)) {
-                                    openaiModels = data.data.map(m => ({
-                                        name: m.id,
-                                        displayName: m.id
-                                    }));
-                                }
-                            }
-                        } catch (error) {
-                            console.log('无法从代理URL获取模型列表，使用预设列表');
-                        }
-                    }
-                    
-                    // 如果从代理获取失败，使用预设列表
-                    if (openaiModels.length === 0) {
-                        openaiModels = [
-                            { name: 'gpt-4-turbo', displayName: 'GPT-4 Turbo' },
-                            { name: 'gpt-4', displayName: 'GPT-4' },
-                            { name: 'gpt-3.5-turbo', displayName: 'GPT-3.5 Turbo' },
-                            { name: 'gpt-4o', displayName: 'GPT-4o' },
-                            { name: 'gpt-4o-mini', displayName: 'GPT-4o Mini' }
-                        ];
-                    }
-                    
-                    appData.models = openaiModels;
+               } else if (apiType === 'openai') {
+    // OpenAI API - 尝试从代理URL获取模型列表
+    let openaiModels = [];
+    
+    if (apiKey) {
+        try {
+            let testUrl = apiUrl || 'https://api.openai.com';
+            
+            // 确保URL有协议前缀
+            if (!testUrl.startsWith('http://') && !testUrl.startsWith('https://')) {
+                testUrl = 'https://' + testUrl;
+            }
+            
+            // 移除末尾的斜杠
+            if (testUrl.endsWith('/')) {
+                testUrl = testUrl.slice(0, -1);
+            }
+            
+            console.log('OpenAI模型请求:', `${testUrl}/v1/models`);
+            
+            const response = await fetch(`${testUrl}/v1/models`, {
+                method: 'GET',
+                mode: 'cors',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${getRandomValue(apiKey)}`
+                }
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                if (data.data && Array.isArray(data.data)) {
+                    openaiModels = data.data.map(m => ({
+                        name: m.id,
+                        displayName: m.id
+                    }));
+                    console.log('获取到OpenAI模型列表:', openaiModels);
+                }
+            } else {
+                const errorText = await response.text();
+                console.error('OpenAI API错误:', response.status, errorText);
+            }
+        } catch (error) {
+            console.error('获取OpenAI模型时出错:', error);
+            showNotification('无法从API获取模型,使用预设列表: ' + error.message);
+        }
+    }
+    
+    // 如果从代理获取失败或没有API Key,使用预设列表
+    if (openaiModels.length === 0) {
+        openaiModels = [
+            { name: 'gpt-4o', displayName: 'GPT-4o (最新)' },
+            { name: 'gpt-4o-mini', displayName: 'GPT-4o Mini (快速)' },
+            { name: 'gpt-4-turbo', displayName: 'GPT-4 Turbo' },
+            { name: 'gpt-4', displayName: 'GPT-4' },
+            { name: 'gpt-3.5-turbo', displayName: 'GPT-3.5 Turbo' },
+            { name: 'gpt-4-turbo-preview', displayName: 'GPT-4 Turbo Preview' },
+            { name: 'gpt-4-1106-preview', displayName: 'GPT-4 1106 Preview' },
+            { name: 'gpt-3.5-turbo-16k', displayName: 'GPT-3.5 Turbo 16K' }
+        ];
+        showNotification('使用预设OpenAI模型列表');
+    }
+    
+    appData.models = openaiModels;
+
+
                     
                 } else {
                     // Ollama或其他本地API
@@ -2626,6 +2839,72 @@ function sendMessagesWithDelay(chat, messages, index = 0) {
             saveData();
             renderMessages();
             showNotification('事件已归档');
+            
+            // ============ 查看归档 ============
+function viewArchives() {
+    const chat = getCurrentChat();
+    if (!chat) {
+        showNotification('请先打开一个聊天');
+        return;
+    }
+    
+    if (!chat.archives || chat.archives.length === 0) {
+        showNotification('暂无归档内容');
+        return;
+    }
+    
+    // 创建一个模态框显示归档
+    let archiveHtml = '<div style="max-height: 400px; overflow-y: auto;">';
+    archiveHtml += '<h3 style="margin-bottom: 15px;">归档记录</h3>';
+    
+    chat.archives.forEach((archive, index) => {
+        archiveHtml += `
+            <div style="padding: 10px; margin-bottom: 10px; background: #f5f5f5; border-radius: 8px; border-left: 3px solid #667eea;">
+                <strong>${index + 1}.</strong> ${archive}
+            </div>
+        `;
+    });
+    
+    archiveHtml += '</div>';
+    
+    // 使用自定义模态框或alert显示
+    const modal = document.createElement('div');
+    modal.className = 'modal show';
+    modal.innerHTML = `
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">归档记录</div>
+                <button class="modal-close" onclick="this.closest('.modal').remove()">×</button>
+            </div>
+            ${archiveHtml}
+            <div class="btn-group" style="margin-top: 15px;">
+                <button class="btn btn-danger" onclick="clearArchives()">清空归档</button>
+                <button class="btn btn-secondary" onclick="this.closest('.modal').remove()">关闭</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+// 清空归档
+function clearArchives() {
+    const chat = getCurrentChat();
+    if (!chat) return;
+    
+    if (confirm('确定要清空所有归档吗？此操作不可恢复！')) {
+        chat.archives = [];
+        saveData();
+        showNotification('归档已清空');
+        // 关闭模态框
+        document.querySelectorAll('.modal').forEach(m => {
+            if (m.querySelector('.modal-title')?.textContent === '归档记录') {
+                m.remove();
+            }
+        });
+    }
+}
+
+
         }
 
         // ============ 导出/导入/清空 ============
